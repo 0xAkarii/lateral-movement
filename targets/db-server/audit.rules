@@ -1,0 +1,34 @@
+# ====================================================================
+# Auditd Rules - Database Server
+# ====================================================================
+
+-D
+-b 8192
+-f 1
+
+# Sensitive files
+-w /etc/passwd -p wa -k credential_file
+-w /etc/shadow -p wa -k credential_file
+
+# MySQL config & data
+-w /etc/mysql -p wa -k mysql_config
+-w /var/lib/mysql -p wa -k mysql_data
+
+# MySQL processes
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/mysql -k db_access
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/mysqldump -k db_dump
+-a always,exit -F arch=b64 -S execve -F path=/usr/sbin/mysqld -k db_process
+
+# Network tools (suspicious from DB server)
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/curl -k network_tool
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/wget -k network_tool
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/nc -k network_tool
+
+# SSH (lateral movement source)
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/ssh -k lateral_movement
+
+# Privilege escalation
+-w /bin/su -p x -k privilege_escalation
+-w /usr/bin/sudo -p x -k privilege_escalation
+
+-e 2

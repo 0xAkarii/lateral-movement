@@ -1,0 +1,260 @@
+<!--
+====================================================================
+Custom Rules - Network Traversal Hunt Scenario
+====================================================================
+Detection coverage:
+- T1190: Exploit Public-Facing Application
+- T1059: Command and Scripting Interpreter
+- T1071: Application Layer Protocol (Reverse Shell)
+- T1021.004: SSH Lateral Movement
+- T1003: OS Credential Dumping
+- T1005: Data from Local System (DB Dump)
+
+Rule ID range: 100100 - 100199 (custom range)
+====================================================================
+-->
+
+<group name="cyber-range,network-traversal,">
+
+  <!-- ================================================================ -->
+  <!-- PHASE 1: RECONNAISSANCE                                          -->
+  <!-- ================================================================ -->
+
+  <rule id="100100" level="5">
+    <if_sid>5715</if_sid>
+    <match>nmap|masscan|zmap</match>
+    <description>Reconnaissance: Network scanning tool detected in command line</description>
+    <mitre>
+      <id>T1046</id>
+    </mitre>
+    <group>recon,</group>
+  </rule>
+
+  <!-- ================================================================ -->
+  <!-- PHASE 2: INITIAL ACCESS - Exploit Web Application                -->
+  <!-- ================================================================ -->
+
+  <!-- Detect command injection patterns in web access logs -->
+  <rule id="100110" level="10">
+    <if_sid>31100</if_sid>
+    <url>cmd=|exec=|system=|eval=</url>
+    <description>Initial Access: Possible command injection attempt on web application</description>
+    <mitre>
+      <id>T1190</id>
+    </mitre>
+    <group>web_attack,initial_access,</group>
+  </rule>
+
+  <rule id="100111" level="12">
+    <if_sid>31100</if_sid>
+    <regex>(?i)(\.\./|/etc/passwd|/etc/shadow|;wget|;curl|\|nc |\|bash)</regex>
+    <description>Initial Access: Suspicious payload in web request - possible RCE</description>
+    <mitre>
+      <id>T1190</id>
+      <id>T1059</id>
+    </mitre>
+    <group>web_attack,initial_access,</group>
+  </rule>
+
+  <!-- ================================================================ -->
+  <!-- PHASE 3: EXECUTION - Suspicious Process Spawning                 -->
+  <!-- ================================================================ -->
+
+  <!-- Web server process spawning shell (auditd execve) -->
+  <rule id="100120" level="13">
+    <if_sid>80700</if_sid>
+    <field name="audit.exe">/bin/sh|/bin/bash|/usr/bin/nc|/usr/bin/python|/usr/bin/perl</field>
+    <field name="audit.ppid">.+</field>
+    <description>Execution: Shell spawned - potential reverse shell from web service</description>
+    <mitre>
+      <id>T1059.004</id>
+      <id>T1190</id>
+    </mitre>
+    <group>execution,reverse_shell,</group>
+  </rule>
+
+  <!-- Specifically detect www-data user spawning shells -->
+  <rule id="100121" level="14">
+    <if_sid>80700</if_sid>
+    <field name="audit.uid">33</field>
+    <field name="audit.exe">/bin/bash|/bin/sh|/usr/bin/nc|/usr/bin/python3|/usr/bin/wget|/usr/bin/curl</field>
+    <description>CRITICAL: www-data user executing shell/network tool - confirmed RCE</description>
+    <mitre>
+      <id>T1059</id>
+      <id>T1190</id>
+    </mitre>
+    <group>execution,reverse_shell,critical,</group>
+  </rule>
+
+  <!-- ================================================================ -->
+  <!-- PHASE 4: DISCOVERY                                                -->
+  <!-- ================================================================ -->
+
+  <rule id="100130" level="8">
+    <if_sid>80700</if_sid>
+    <field name="audit.exe">/usr/bin/whoami|/usr/bin/id|/usr/bin/hostname|/usr/bin/uname</field>
+    <field name="audit.uid">33</field>
+    <description>Discovery: System enumeration command executed by web user</description>
+    <mitre>
+      <id>T1082</id>
+    </mitre>
+    <group>discovery,</group>
+  </rule>
+
+  <rule id="100131" level="8">
+    <if_sid>80700</if_sid>
+    <field name="audit.exe">/sbin/ifconfig|/usr/bin/ip|/usr/bin/ss|/usr/bin/netstat|/usr/bin/arp</field>
+    <field name="audit.uid">33</field>
+    <description>Discovery: Network enumeration command executed by web user</description>
+    <mitre>
+      <id>T1016</id>
+    </mitre>
+    <group>discovery,</group>
+  </rule>
+
+  <rule id="100132" level="9">
+    <if_sid>80700</if_sid>
+    <field name="audit.exe">/bin/cat|/usr/bin/cat|/bin/grep</field>
+    <field name="audit.file.name">/etc/passwd|/etc/hosts|/etc/network|.ssh/</field>
+    <description>Discovery: Sensitive file enumeration</description>
+    <mitre>
+      <id>T1083</id>
+    </mitre>
+    <group>discovery,</group>
+  </rule>
+
+  <!-- ================================================================ -->
+  <!-- PHASE 5: CREDENTIAL ACCESS                                        -->
+  <!-- ================================================================ -->
+
+  <rule id="100140" level="13">
+    <if_sid>80700</if_sid>
+    <field name="audit.file.name">/etc/shadow|/etc/gshadow|/root/.ssh/id_rsa</field>
+    <description>CRITICAL: Sensitive credential file access detected</description>
+    <mitre>
+      <id>T1003.008</id>
+      <id>T1552.004</id>
+    </mitre>
+    <group>credential_access,critical,</group>
+  </rule>
+
+  <rule id="100141" level="11">
+    <if_sid>80700</if_sid>
+    <field name="audit.file.name">id_rsa|authorized_keys|.bash_history|config.php|wp-config|database.yml|.env</field>
+    <description>Credential Access: Access to potential secret file</description>
+    <mitre>
+      <id>T1552</id>
+    </mitre>
+    <group>credential_access,</group>
+  </rule>
+
+  <!-- ================================================================ -->
+  <!-- PHASE 6: LATERAL MOVEMENT                                         -->
+  <!-- ================================================================ -->
+
+  <!-- SSH login from DMZ network to internal -->
+  <rule id="100150" level="12">
+    <if_sid>5715</if_sid>
+    <srcip>10.10.10.0/24</srcip>
+    <description>CRITICAL: SSH login from DMZ network - possible lateral movement</description>
+    <mitre>
+      <id>T1021.004</id>
+    </mitre>
+    <group>lateral_movement,critical,</group>
+  </rule>
+
+  <!-- SSH from container hostname pattern -->
+  <rule id="100151" level="12">
+    <if_sid>5715</if_sid>
+    <user>devops|webapp|tomcat|nginx|www-data</user>
+    <description>Lateral Movement: SSH login from service account</description>
+    <mitre>
+      <id>T1021.004</id>
+      <id>T1078</id>
+    </mitre>
+    <group>lateral_movement,</group>
+  </rule>
+
+  <!-- New SSH connection from web server context -->
+  <rule id="100152" level="11">
+    <if_sid>80700</if_sid>
+    <field name="audit.exe">/usr/bin/ssh|/usr/bin/scp|/usr/bin/sftp</field>
+    <field name="audit.uid">33</field>
+    <description>Lateral Movement: SSH client invoked by www-data</description>
+    <mitre>
+      <id>T1021.004</id>
+    </mitre>
+    <group>lateral_movement,</group>
+  </rule>
+
+  <!-- ================================================================ -->
+  <!-- PHASE 7: COLLECTION & EXFILTRATION                                -->
+  <!-- ================================================================ -->
+
+  <rule id="100160" level="13">
+    <if_sid>80700</if_sid>
+    <field name="audit.exe">/usr/bin/mysqldump|/usr/bin/pg_dump|/usr/bin/mongodump</field>
+    <description>CRITICAL: Database dump tool executed - possible exfiltration</description>
+    <mitre>
+      <id>T1005</id>
+      <id>T1041</id>
+    </mitre>
+    <group>collection,exfiltration,critical,</group>
+  </rule>
+
+  <rule id="100161" level="11">
+    <if_sid>80700</if_sid>
+    <field name="audit.exe">/usr/bin/mysql|/usr/bin/psql</field>
+    <field name="audit.cmdline">SELECT|UNION|--password|-p</field>
+    <description>Collection: Database client invoked with credentials</description>
+    <mitre>
+      <id>T1005</id>
+    </mitre>
+    <group>collection,</group>
+  </rule>
+
+  <!-- ================================================================ -->
+  <!-- PHASE 8: PERSISTENCE                                              -->
+  <!-- ================================================================ -->
+
+  <rule id="100170" level="11">
+    <if_sid>80700</if_sid>
+    <field name="audit.exe">/usr/bin/crontab|/bin/systemctl</field>
+    <field name="audit.uid">33</field>
+    <description>Persistence: Scheduled task or service modification by web user</description>
+    <mitre>
+      <id>T1053.003</id>
+      <id>T1543.002</id>
+    </mitre>
+    <group>persistence,</group>
+  </rule>
+
+  <rule id="100171" level="10">
+    <if_sid>550</if_sid>
+    <field name="file">/etc/crontab|/etc/cron|/etc/systemd|.bashrc|.profile|authorized_keys</field>
+    <description>Persistence: Modification of startup/scheduled task file</description>
+    <mitre>
+      <id>T1543</id>
+      <id>T1547</id>
+    </mitre>
+    <group>persistence,</group>
+  </rule>
+
+  <!-- ================================================================ -->
+  <!-- CORRELATION RULES                                                 -->
+  <!-- ================================================================ -->
+
+  <!-- Multi-stage attack: web exploit + shell + lateral within 5 min -->
+  <rule id="100190" level="15" frequency="3" timeframe="300">
+    <if_matched_sid>100120</if_matched_sid>
+    <if_sid>100150</if_sid>
+    <description>FULL KILL CHAIN: Web RCE + Lateral Movement detected within 5 minutes</description>
+    <mitre>
+      <id>T1190</id>
+      <id>T1059</id>
+      <id>T1021</id>
+    </mitre>
+    <group>attack_chain,critical,</group>
+  </rule>
+
+</group>

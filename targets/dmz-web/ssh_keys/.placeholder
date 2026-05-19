@@ -1,0 +1,2 @@
+PLACEHOLDER - akan di-replace dengan real SSH key saat setup
+Generate dengan: ssh-keygen -t rsa -b 2048 -f targets/dmz-web/ssh_keys/id_rsa -N ""

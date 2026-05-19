@@ -1,0 +1,267 @@
+# ====================================================================
+# CYBER RANGE DEMO - Network Traversal Hunt Scenario
+# ====================================================================
+# Architecture:
+#   - Wazuh Stack (Manager + Indexer + Dashboard) running as containers
+#   - 3 Target containers (DMZ Web -> Internal App -> Database)
+#   - Each target has Wazuh agent installed (auto-enrolled)
+#   - Red Team & Blue Team users connect via Guacamole to their
+#     security distribution VMs (Kali/Parrot) - external to this stack
+#
+# Networks:
+#   - red_path     (10.10.10.0/24) : Red Team attack surface
+#   - internal_net (172.20.0.0/24) : Lateral movement path
+#   - wazuh_net    (172.30.0.0/24) : Wazuh stack internal
+#   - blue_access  (172.40.0.0/24) : Blue Team dashboard access
+# ====================================================================
+
+services:
+  # ==================================================================
+  # WAZUH STACK
+  # ==================================================================
+
+  wazuh-manager:
+    image: wazuh/wazuh-manager:4.7.5
+    hostname: wazuh-manager
+    container_name: wazuh-manager
+    restart: always
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 655360
+        hard: 655360
+    ports:
+      - "1514:1514"           # Agent communication
+      - "1515:1515"           # Agent enrollment
+      - "514:514/udp"         # Syslog
+      - "55000:55000"         # Wazuh API
+    environment:
+      - INDEXER_URL=https://wazuh-indexer:9200
+      - INDEXER_USERNAME=admin
+      - INDEXER_PASSWORD=SecretPassword
+      - FILEBEAT_SSL_VERIFICATION_MODE=full
+      - SSL_CERTIFICATE_AUTHORITIES=/etc/ssl/root-ca.pem
+      - SSL_CERTIFICATE=/etc/ssl/filebeat.pem
+      - SSL_KEY=/etc/ssl/filebeat.key
+      - API_USERNAME=wazuh-wui
+      - API_PASSWORD=MyS3cr37P450r.*-
+    volumes:
+      - wazuh_api_configuration:/var/ossec/api/configuration
+      - wazuh_etc:/var/ossec/etc
+      - wazuh_logs:/var/ossec/logs
+      - wazuh_queue:/var/ossec/queue
+      - wazuh_var_multigroups:/var/ossec/var/multigroups
+      - wazuh_integrations:/var/ossec/integrations
+      - wazuh_active_response:/var/ossec/active-response/bin
+      - wazuh_agentless:/var/ossec/agentless
+      - wazuh_wodles:/var/ossec/wodles
+      - filebeat_etc:/etc/filebeat
+      - filebeat_var:/var/lib/filebeat
+      # Custom rules and decoders
+      - ./wazuh/custom-rules:/var/ossec/etc/rules.custom:ro
+      - ./wazuh/custom-decoders:/var/ossec/etc/decoders.custom:ro
+      # Certificates
+      - ./certs/wazuh-manager.pem:/etc/ssl/filebeat.pem:ro
+      - ./certs/wazuh-manager-key.pem:/etc/ssl/filebeat.key:ro
+      - ./certs/root-ca.pem:/etc/ssl/root-ca.pem:ro
+    networks:
+      wazuh_net:
+        ipv4_address: 172.30.0.10
+      blue_access:
+        ipv4_address: 172.40.0.10
+      internal_net:
+        ipv4_address: 172.20.0.5
+      red_path:
+        ipv4_address: 10.10.10.5
+
+  wazuh-indexer:
+    image: wazuh/wazuh-indexer:4.7.5
+    hostname: wazuh-indexer
+    container_name: wazuh-indexer
+    restart: always
+    ports:
+      - "9200:9200"
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms2g -Xmx2g"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - wazuh_indexer_data:/var/lib/wazuh-indexer
+      - ./wazuh/config/wazuh_indexer/wazuh.indexer.yml:/usr/share/wazuh-indexer/opensearch.yml
+      - ./wazuh/config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/opensearch-security/internal_users.yml
+      - ./certs/root-ca.pem:/usr/share/wazuh-indexer/certs/root-ca.pem:ro
+      - ./certs/wazuh-indexer.pem:/usr/share/wazuh-indexer/certs/wazuh-indexer.pem:ro
+      - ./certs/wazuh-indexer-key.pem:/usr/share/wazuh-indexer/certs/wazuh-indexer-key.pem:ro
+      - ./certs/admin.pem:/usr/share/wazuh-indexer/certs/admin.pem:ro
+      - ./certs/admin-key.pem:/usr/share/wazuh-indexer/certs/admin-key.pem:ro
+    networks:
+      wazuh_net:
+        ipv4_address: 172.30.0.20
+
+  wazuh-dashboard:
+    image: wazuh/wazuh-dashboard:4.7.5
+    hostname: wazuh-dashboard
+    container_name: wazuh-dashboard
+    restart: always
+    ports:
+      - "443:5601"
+    environment:
+      - INDEXER_USERNAME=admin
+      - INDEXER_PASSWORD=SecretPassword
+      - WAZUH_API_URL=https://wazuh-manager
+      - DASHBOARD_USERNAME=kibanaserver
+      - DASHBOARD_PASSWORD=kibanaserver
+      - API_USERNAME=wazuh-wui
+      - API_PASSWORD=MyS3cr37P450r.*-
+    volumes:
+      - ./wazuh/config/wazuh_dashboard/opensearch_dashboards.yml:/usr/share/wazuh-dashboard/config/opensearch_dashboards.yml
+      - ./wazuh/config/wazuh_dashboard/wazuh.yml:/usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml
+      - ./certs/wazuh-dashboard.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard.pem:ro
+      - ./certs/wazuh-dashboard-key.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard-key.pem:ro
+      - ./certs/root-ca.pem:/usr/share/wazuh-dashboard/certs/root-ca.pem:ro
+    depends_on:
+      - wazuh-indexer
+    networks:
+      wazuh_net:
+        ipv4_address: 172.30.0.30
+      blue_access:
+        ipv4_address: 172.40.0.30
+
+  # ==================================================================
+  # TARGET LAB - Network Traversal Scenario
+  # ==================================================================
+
+  # ENTRY POINT (DMZ) - Vulnerable PHP web app with command injection
+  dmz-web:
+    build:
+      context: ./targets/dmz-web
+      dockerfile: Dockerfile
+    hostname: dmz-web
+    container_name: dmz-web
+    restart: unless-stopped
+    cap_add:
+      - AUDIT_WRITE
+      - AUDIT_CONTROL
+      - SYS_PTRACE
+    environment:
+      - WAZUH_MANAGER=172.30.0.10
+      - WAZUH_AGENT_NAME=dmz-web
+      - WAZUH_AGENT_GROUP=scenario-net-traversal,dmz
+    networks:
+      red_path:
+        ipv4_address: 10.10.10.10
+      internal_net:
+        ipv4_address: 172.20.0.10
+      wazuh_net:
+        ipv4_address: 172.30.0.100
+    depends_on:
+      - wazuh-manager
+
+  # LATERAL TARGET - Internal app server (SSH pivot)
+  internal-app:
+    build:
+      context: ./targets/internal-app
+      dockerfile: Dockerfile
+    hostname: internal-app
+    container_name: internal-app
+    restart: unless-stopped
+    cap_add:
+      - AUDIT_WRITE
+      - AUDIT_CONTROL
+      - SYS_PTRACE
+    environment:
+      - WAZUH_MANAGER=172.30.0.10
+      - WAZUH_AGENT_NAME=internal-app
+      - WAZUH_AGENT_GROUP=scenario-net-traversal,internal
+    networks:
+      internal_net:
+        ipv4_address: 172.20.0.20
+      wazuh_net:
+        ipv4_address: 172.30.0.101
+    depends_on:
+      - wazuh-manager
+
+  # CROWN JEWEL - MySQL database with customer data
+  db-server:
+    build:
+      context: ./targets/db-server
+      dockerfile: Dockerfile
+    hostname: db-server
+    container_name: db-server
+    restart: unless-stopped
+    cap_add:
+      - AUDIT_WRITE
+      - AUDIT_CONTROL
+      - SYS_PTRACE
+    environment:
+      - WAZUH_MANAGER=172.30.0.10
+      - WAZUH_AGENT_NAME=db-server
+      - WAZUH_AGENT_GROUP=scenario-net-traversal,database
+      - MYSQL_ROOT_PASSWORD=Pr0d_DB_2024!
+    networks:
+      internal_net:
+        ipv4_address: 172.20.0.30
+      wazuh_net:
+        ipv4_address: 172.30.0.102
+    depends_on:
+      - wazuh-manager
+
+# ====================================================================
+# NETWORKS
+# ====================================================================
+networks:
+  # Red Team attack path - reachable from Kali VM
+  red_path:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.10.10.0/24
+
+  # Internal lateral movement network
+  internal_net:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/24
+
+  # Wazuh stack + agent telemetry channel
+  wazuh_net:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.30.0.0/24
+
+  # Blue Team dashboard access
+  blue_access:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.40.0.0/24
+
+# ====================================================================
+# VOLUMES
+# ====================================================================
+volumes:
+  wazuh_api_configuration:
+  wazuh_etc:
+  wazuh_logs:
+  wazuh_queue:
+  wazuh_var_multigroups:
+  wazuh_integrations:
+  wazuh_active_response:
+  wazuh_agentless:
+  wazuh_wodles:
+  filebeat_etc:
+  filebeat_var:
+  wazuh_indexer_data:

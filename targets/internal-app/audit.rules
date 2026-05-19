@@ -1,0 +1,38 @@
+# ====================================================================
+# Auditd Rules - Internal App Server
+# ====================================================================
+
+-D
+-b 8192
+-f 1
+
+# File access monitoring
+-w /etc/passwd -p wa -k credential_file
+-w /etc/shadow -p wa -k credential_file
+-w /etc/sudoers -p wa -k credential_file
+
+# SSH config files
+-w /home -p wa -k home_dir
+-w /root/.ssh -p wa -k ssh_key
+-w /home/webapp/.ssh -p wa -k ssh_key
+
+# Sensitive app config
+-w /home/webapp/app/config -p ra -k sensitive_config
+-w /home/webapp/app/.env -p ra -k sensitive_config
+
+# Process execution tracking
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/mysql -k db_access
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/mysqldump -k db_dump
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/curl -k network_tool
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/wget -k network_tool
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/ssh -k lateral_movement
+
+# Track all execve from non-root users
+-a always,exit -F arch=b64 -S execve -F euid=1000 -k user_execution
+-a always,exit -F arch=b32 -S execve -F euid=1000 -k user_execution
+
+# Privilege escalation
+-w /bin/su -p x -k privilege_escalation
+-w /usr/bin/sudo -p x -k privilege_escalation
+
+-e 2

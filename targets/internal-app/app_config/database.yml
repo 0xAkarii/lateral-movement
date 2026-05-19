@@ -1,0 +1,24 @@
+# Application database configuration
+# Production environment
+
+production:
+  adapter: mysql2
+  encoding: utf8
+  host: db-server
+  port: 3306
+  database: customers
+  username: appuser
+  password: AppDB_P@ssw0rd_2024
+  pool: 25
+  timeout: 5000
+
+# Read replica for analytics
+analytics:
+  adapter: mysql2
+  encoding: utf8
+  host: db-server
+  port: 3306
+  database: analytics
+  username: readonly
+  password: ReadOnly_2024
+  pool: 5

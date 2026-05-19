@@ -1,0 +1,8 @@
+cd ~/app
+mysql -h db-server -u appuser -pAppDB_P@ssw0rd_2024 customers
+mysql -h db-server -u root -p'Pr0d_DB_2024!' customers
+mysqldump -h db-server -u appuser -pAppDB_P@ssw0rd_2024 customers > backup.sql
+ls -la
+cat .env
+ssh webapp@db-server
+exit

@@ -1,0 +1,53 @@
+# ====================================================================
+# Auditd Rules - DMZ Web Server
+# Track suspicious behavior buat detection
+# ====================================================================
+
+# Delete all previous rules
+-D
+
+# Buffer size
+-b 8192
+
+# Failure mode: 1 = printk
+-f 1
+
+# ===== File access monitoring =====
+# Sensitive credential files
+-w /etc/passwd -p wa -k credential_file
+-w /etc/shadow -p wa -k credential_file
+-w /etc/gshadow -p wa -k credential_file
+-w /etc/sudoers -p wa -k credential_file
+
+# SSH keys
+-w /root/.ssh -p wa -k ssh_key
+-w /home -p wa -k home_dir
+-w /var/www/html/.maintenance_key -p wa -k maintenance_key
+
+# Web server config
+-w /etc/apache2 -p wa -k web_config
+
+# ===== Process execution =====
+# Track shell spawning by web process
+-a always,exit -F arch=b64 -S execve -F euid=33 -k www_execution
+-a always,exit -F arch=b32 -S execve -F euid=33 -k www_execution
+
+# Track network tools execution
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/nc -k network_tool
+-a always,exit -F arch=b64 -S execve -F path=/bin/nc -k network_tool
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/curl -k network_tool
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/wget -k network_tool
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/ssh -k lateral_movement
+
+# Track user/group changes
+-w /usr/sbin/useradd -p x -k user_modification
+-w /usr/sbin/usermod -p x -k user_modification
+-w /usr/sbin/groupadd -p x -k user_modification
+
+# Track privilege escalation attempts
+-w /bin/su -p x -k privilege_escalation
+-w /usr/bin/sudo -p x -k privilege_escalation
+-w /etc/sudoers -p rw -k privilege_escalation
+
+# Make rules immutable
+-e 2
