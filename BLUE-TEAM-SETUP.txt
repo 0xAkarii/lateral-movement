@@ -1,0 +1,619 @@
+================================================================================
+                  KERBEROASTING LAB - BLUE TEAM SETUP GUIDE
+================================================================================
+Purpose      : Setup monitoring, detection, hunting, dan response untuk skenario
+               Kerberoasting di Active Directory lab.
+Target Audien: Blue Team / SOC Analyst / DFIR / Purple Team
+Versi        : 1.0
+Lisensi      : Edukasi - Lab terisolasi, JANGAN deploy mentah ke production
+================================================================================
+
+
+================================================================================
+[ 1 ] TOPOLOGI BLUE TEAM
+================================================================================
+
+  +------------------+        +------------------+        +------------------+
+  |      DC01        |        |      WAZUH       |        |      KALI        |
+  | Win Server 2022  |------->|  SIEM / Manager  |<-------| Red Team Box     |
+  | 10.10.10.10      | logs   | 10.10.10.20      | attack | 10.10.10.50      |
+  | corp.local       |        | Ubuntu 22.04     |        |                  |
+  +------------------+        +------------------+        +------------------+
+
+  Lab minimal:
+
+    - DC01   : Windows Server Domain Controller
+    - WAZUH  : Ubuntu SIEM
+    - KALI   : Red Team test box
+
+  Resource rekomendasi:
+
+    - DC01  : 4 GB RAM, 2 vCPU
+    - Wazuh : 8 GB RAM, 2-4 vCPU
+    - Kali  : 2 GB RAM, 2 vCPU
+
+
+================================================================================
+[ 2 ] TUJUAN DETEKSI
+================================================================================
+
+Blue Team harus bisa mendeteksi:
+
+  - Request TGS Kerberos mencurigakan.
+  - Event ID 4769 dengan TicketEncryptionType 0x17 / RC4.
+  - Banyak SPN request dari satu user dalam waktu pendek.
+  - Request ke honeypot SPN.
+  - Login lanjutan memakai service account privileged.
+  - Aktivitas PowerShell / tool seperti Rubeus atau Invoke-Kerberoast.
+
+MITRE ATT&CK:
+
+  T1558.003 - Kerberoasting
+  T1558.004 - AS-REP Roasting
+  T1059.001 - PowerShell
+  T1078.002 - Valid Domain Accounts
+
+
+================================================================================
+[ 3 ] AKTIFKAN AUDIT POLICY DI DOMAIN CONTROLLER
+================================================================================
+
+Jalankan di DC01 sebagai Administrator.
+
+--------------------------------------------------------------------------------
+[3.1] Kerberos dan Logon Audit
+--------------------------------------------------------------------------------
+
+  auditpol /set /subcategory:"Kerberos Service Ticket Operations" /success:enable /failure:enable
+  auditpol /set /subcategory:"Kerberos Authentication Service" /success:enable /failure:enable
+  auditpol /set /subcategory:"Credential Validation" /success:enable /failure:enable
+  auditpol /set /subcategory:"Logon" /success:enable /failure:enable
+  auditpol /set /subcategory:"Special Logon" /success:enable /failure:enable
+  auditpol /set /subcategory:"Account Lockout" /success:enable /failure:enable
+
+--------------------------------------------------------------------------------
+[3.2] Directory Service Audit
+--------------------------------------------------------------------------------
+
+  auditpol /set /subcategory:"Directory Service Access" /success:enable /failure:enable
+  auditpol /set /subcategory:"Directory Service Changes" /success:enable /failure:enable
+
+--------------------------------------------------------------------------------
+[3.3] Verifikasi
+--------------------------------------------------------------------------------
+
+  auditpol /get /category:*
+
+Event penting:
+
+  4768 - Kerberos TGT requested
+  4769 - Kerberos service ticket requested
+  4771 - Kerberos pre-auth failed
+  4624 - Successful logon
+  4625 - Failed logon
+  4672 - Special privileges assigned
+  5140 - Network share accessed
+
+
+================================================================================
+[ 4 ] AKTIFKAN POWERSHELL LOGGING
+================================================================================
+
+Jalankan di DC01 sebagai Administrator.
+
+--------------------------------------------------------------------------------
+[4.1] Script Block Logging
+--------------------------------------------------------------------------------
+
+  $basePath = 'HKLM:\Software\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging'
+  New-Item $basePath -Force | Out-Null
+  Set-ItemProperty $basePath -Name EnableScriptBlockLogging -Value 1
+
+--------------------------------------------------------------------------------
+[4.2] Module Logging
+--------------------------------------------------------------------------------
+
+  $modPath = 'HKLM:\Software\Policies\Microsoft\Windows\PowerShell\ModuleLogging'
+  New-Item $modPath -Force | Out-Null
+  Set-ItemProperty $modPath -Name EnableModuleLogging -Value 1
+  New-Item "$modPath\ModuleNames" -Force | Out-Null
+  Set-ItemProperty "$modPath\ModuleNames" -Name '*' -Value '*'
+
+--------------------------------------------------------------------------------
+[4.3] PowerShell Transcription
+--------------------------------------------------------------------------------
+
+  New-Item C:\PSLogs -ItemType Directory -Force | Out-Null
+
+  $tsPath = 'HKLM:\Software\Policies\Microsoft\Windows\PowerShell\Transcription'
+  New-Item $tsPath -Force | Out-Null
+  Set-ItemProperty $tsPath -Name EnableTranscripting -Value 1
+  Set-ItemProperty $tsPath -Name OutputDirectory -Value 'C:\PSLogs'
+
+Log path:
+
+  Microsoft-Windows-PowerShell/Operational
+
+Event penting:
+
+  4104 - PowerShell Script Block
+
+
+================================================================================
+[ 5 ] INSTALL SYSMON DI DC01
+================================================================================
+
+Sysmon memberi telemetry process, network, file, DNS, dll.
+
+--------------------------------------------------------------------------------
+[5.1] Download Sysmon dan Config
+--------------------------------------------------------------------------------
+
+  New-Item C:\Tools -ItemType Directory -Force | Out-Null
+
+  Invoke-WebRequest -Uri "https://download.sysinternals.com/files/Sysmon.zip" `
+      -OutFile "C:\Tools\Sysmon.zip"
+
+  Expand-Archive C:\Tools\Sysmon.zip -DestinationPath C:\Tools\Sysmon -Force
+
+  Invoke-WebRequest -Uri "https://raw.githubusercontent.com/olafhartong/sysmon-modular/master/sysmonconfig.xml" `
+      -OutFile "C:\Tools\Sysmon\sysmonconfig.xml"
+
+--------------------------------------------------------------------------------
+[5.2] Install Sysmon
+--------------------------------------------------------------------------------
+
+  C:\Tools\Sysmon\Sysmon64.exe -accepteula -i C:\Tools\Sysmon\sysmonconfig.xml
+
+--------------------------------------------------------------------------------
+[5.3] Event Sysmon Penting
+--------------------------------------------------------------------------------
+
+  1  - Process Create
+  3  - Network Connection
+  10 - Process Access
+  11 - File Create
+  22 - DNS Query
+
+Log path:
+
+  Microsoft-Windows-Sysmon/Operational
+
+
+================================================================================
+[ 6 ] BUAT HONEYPOT SPN / CANARY ACCOUNT
+================================================================================
+
+Tujuan: setiap TGS request ke account ini dianggap high-confidence attack.
+
+Jalankan di DC01 sebagai Domain Admin.
+
+--------------------------------------------------------------------------------
+[6.1] Buat Honeypot Account
+--------------------------------------------------------------------------------
+
+  Add-Type -AssemblyName System.Web
+  $randomPwd = [System.Web.Security.Membership]::GeneratePassword(40, 10)
+
+  New-ADUser -Name "svc_sqlbackup_legacy" `
+      -SamAccountName "svc_sqlbackup_legacy" `
+      -UserPrincipalName "svc_sqlbackup_legacy@corp.local" `
+      -Description "SQL admin svc - pwd: see vault" `
+      -AccountPassword (ConvertTo-SecureString $randomPwd -AsPlainText -Force) `
+      -Enabled $true `
+      -PasswordNeverExpires $true
+
+--------------------------------------------------------------------------------
+[6.2] Tambahkan SPN Menarik
+--------------------------------------------------------------------------------
+
+  setspn -A MSSQLSvc/sql-finance.corp.local:1433 svc_sqlbackup_legacy
+  setspn -A MSSQLSvc/sql-finance.corp.local svc_sqlbackup_legacy
+
+--------------------------------------------------------------------------------
+[6.3] Verifikasi
+--------------------------------------------------------------------------------
+
+  setspn -L svc_sqlbackup_legacy
+
+Alert rule:
+
+  Event ID 4769 + ServiceName svc_sqlbackup_legacy = CRITICAL.
+
+
+================================================================================
+[ 7 ] INSTALL WAZUH SIEM
+================================================================================
+
+Jalankan di Ubuntu 22.04 server dengan IP 10.10.10.20.
+
+--------------------------------------------------------------------------------
+[7.1] Install Wazuh All-in-One
+--------------------------------------------------------------------------------
+
+  curl -sO https://packages.wazuh.com/4.9/wazuh-install.sh
+  sudo bash ./wazuh-install.sh -a
+
+Setelah selesai:
+
+  Dashboard : https://10.10.10.20
+  Username  : admin
+  Password  : ditampilkan di akhir installer
+
+--------------------------------------------------------------------------------
+[7.2] Install Wazuh Agent di DC01
+--------------------------------------------------------------------------------
+
+Jalankan di DC01 PowerShell Admin:
+
+  Invoke-WebRequest -Uri https://packages.wazuh.com/4.x/windows/wazuh-agent-4.9.0-1.msi `
+      -OutFile $env:tmp\wazuh-agent.msi
+
+  msiexec.exe /i $env:tmp\wazuh-agent.msi /q WAZUH_MANAGER='10.10.10.20' WAZUH_AGENT_NAME='DC01'
+
+  NET START WazuhSvc
+
+--------------------------------------------------------------------------------
+[7.3] Forward Security, Sysmon, PowerShell Logs
+--------------------------------------------------------------------------------
+
+Edit file:
+
+  C:\Program Files (x86)\ossec-agent\ossec.conf
+
+Tambahkan:
+
+  <localfile>
+    <location>Security</location>
+    <log_format>eventchannel</log_format>
+  </localfile>
+
+  <localfile>
+    <location>Microsoft-Windows-Sysmon/Operational</location>
+    <log_format>eventchannel</log_format>
+  </localfile>
+
+  <localfile>
+    <location>Microsoft-Windows-PowerShell/Operational</location>
+    <log_format>eventchannel</log_format>
+  </localfile>
+
+Restart agent:
+
+  Restart-Service WazuhSvc
+
+
+================================================================================
+[ 8 ] WAZUH DETECTION RULES
+================================================================================
+
+Edit di Wazuh server:
+
+  /var/ossec/etc/rules/local_rules.xml
+
+Tambahkan rule berikut.
+
+--------------------------------------------------------------------------------
+[8.1] Kerberoasting RC4 TGS Request
+--------------------------------------------------------------------------------
+
+  <group name="windows,kerberos,kerberoasting,">
+
+    <rule id="100100" level="12">
+      <if_sid>60103</if_sid>
+      <field name="win.system.eventID">^4769$</field>
+      <field name="win.eventdata.ticketEncryptionType">^0x17$</field>
+      <field name="win.eventdata.serviceName" negate="yes">\$$</field>
+      <description>Possible Kerberoasting: RC4 TGS requested for $(win.eventdata.serviceName) by $(win.eventdata.targetUserName)</description>
+      <mitre>
+        <id>T1558.003</id>
+      </mitre>
+    </rule>
+
+    <rule id="100101" level="15">
+      <if_sid>60103</if_sid>
+      <field name="win.system.eventID">^4769$</field>
+      <field name="win.eventdata.serviceName">svc_sqlbackup_legacy</field>
+      <description>HONEYPOT SPN TRIGGERED by $(win.eventdata.targetUserName) from $(win.eventdata.ipAddress)</description>
+      <mitre>
+        <id>T1558.003</id>
+      </mitre>
+    </rule>
+
+    <rule id="100102" level="13" frequency="10" timeframe="60">
+      <if_matched_sid>100100</if_matched_sid>
+      <same_field>win.eventdata.targetUserName</same_field>
+      <description>Mass Kerberoasting: same user requested 10+ RC4 TGS in 60 seconds</description>
+    </rule>
+
+    <rule id="100103" level="14">
+      <if_sid>91802</if_sid>
+      <field name="win.eventdata.scriptBlockText" type="pcre2">(?i)(invoke-kerberoast|get-domainspn|rubeus.*kerberoast|requesttgs|getuserspns)</field>
+      <description>Kerberoasting tooling detected in PowerShell</description>
+      <mitre>
+        <id>T1558.003</id>
+        <id>T1059.001</id>
+      </mitre>
+    </rule>
+
+  </group>
+
+Restart Wazuh manager:
+
+  sudo systemctl restart wazuh-manager
+
+
+================================================================================
+[ 9 ] SIGMA RULE ALTERNATIF
+================================================================================
+
+File: kerberoasting-4769-rc4.yml
+
+  title: Potential Kerberoasting via RC4 Service Ticket Request
+  id: 6c4f1c8a-kerberoast-lab-001
+  status: test
+  description: Detects RC4 Kerberos service ticket requests for user service accounts
+  logsource:
+    product: windows
+    service: security
+  detection:
+    selection:
+      EventID: 4769
+      TicketEncryptionType: '0x17'
+    filter_machine:
+      ServiceName|endswith: '$'
+    filter_krbtgt:
+      ServiceName: 'krbtgt'
+    condition: selection and not filter_machine and not filter_krbtgt
+  falsepositives:
+    - Legacy applications using RC4
+  level: high
+  tags:
+    - attack.credential_access
+    - attack.t1558.003
+
+
+================================================================================
+[ 10 ] POWERSHELL HUNTING QUERIES DI DC01
+================================================================================
+
+--------------------------------------------------------------------------------
+[10.1] Semua TGS Request 4 Jam Terakhir
+--------------------------------------------------------------------------------
+
+  Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4769; StartTime=(Get-Date).AddHours(-4)} |
+    ForEach-Object {
+      [PSCustomObject]@{
+        Time    = $_.TimeCreated
+        User    = $_.Properties[0].Value
+        Service = $_.Properties[2].Value
+        EncType = $_.Properties[5].Value
+        IP      = $_.Properties[6].Value
+      }
+    } | Format-Table -Auto
+
+--------------------------------------------------------------------------------
+[10.2] Suspicious RC4 TGS
+--------------------------------------------------------------------------------
+
+  Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4769; StartTime=(Get-Date).AddHours(-4)} |
+    ForEach-Object {
+      [PSCustomObject]@{
+        Time    = $_.TimeCreated
+        User    = $_.Properties[0].Value
+        Service = $_.Properties[2].Value
+        EncType = $_.Properties[5].Value
+        IP      = $_.Properties[6].Value
+      }
+    } |
+    Where-Object { $_.EncType -eq '0x17' -and $_.Service -notlike '*$' -and $_.Service -ne 'krbtgt' } |
+    Format-Table -Auto
+
+--------------------------------------------------------------------------------
+[10.3] Banyak SPN Request dari Satu User
+--------------------------------------------------------------------------------
+
+  Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4769; StartTime=(Get-Date).AddHours(-4)} |
+    ForEach-Object {
+      [PSCustomObject]@{
+        User    = $_.Properties[0].Value
+        Service = $_.Properties[2].Value
+        EncType = $_.Properties[5].Value
+      }
+    } |
+    Where-Object { $_.Service -notlike '*$' -and $_.Service -ne 'krbtgt' } |
+    Group-Object User |
+    Sort-Object Count -Descending |
+    Select-Object Name, Count
+
+--------------------------------------------------------------------------------
+[10.4] Honeypot SPN Trigger
+--------------------------------------------------------------------------------
+
+  Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4769; StartTime=(Get-Date).AddHours(-24)} |
+    ForEach-Object {
+      [PSCustomObject]@{
+        Time    = $_.TimeCreated
+        User    = $_.Properties[0].Value
+        Service = $_.Properties[2].Value
+        IP      = $_.Properties[6].Value
+      }
+    } |
+    Where-Object { $_.Service -like '*svc_sqlbackup_legacy*' } |
+    Format-Table -Auto
+
+--------------------------------------------------------------------------------
+[10.5] Login Privileged svc_admin
+--------------------------------------------------------------------------------
+
+  Get-WinEvent -FilterHashtable @{LogName='Security'; ID=4624; StartTime=(Get-Date).AddHours(-4)} |
+    ForEach-Object {
+      [PSCustomObject]@{
+        Time      = $_.TimeCreated
+        Account   = $_.Properties[5].Value
+        LogonType = $_.Properties[8].Value
+        IP        = $_.Properties[18].Value
+      }
+    } |
+    Where-Object { $_.Account -eq 'svc_admin' -or $_.IP -eq '10.10.10.50' } |
+    Format-Table -Auto
+
+
+================================================================================
+[ 11 ] HARDENING / PREVENTION SETUP
+================================================================================
+
+--------------------------------------------------------------------------------
+[11.1] Buat gMSA sebagai Contoh Secure Service Account
+--------------------------------------------------------------------------------
+
+  Add-KdsRootKey -EffectiveTime ((Get-Date).AddHours(-10))
+
+  New-ADServiceAccount -Name "gmsa_sql" `
+      -DNSHostName "sql01.corp.local" `
+      -PrincipalsAllowedToRetrieveManagedPassword "Domain Computers" `
+      -ServicePrincipalNames "MSSQLSvc/sql01.corp.local:1433"
+
+  Get-ADServiceAccount gmsa_sql -Properties *
+
+--------------------------------------------------------------------------------
+[11.2] Remove Domain Admin dari Service Account Legacy
+--------------------------------------------------------------------------------
+
+  Remove-ADGroupMember -Identity "Domain Admins" -Members svc_admin -Confirm:$false
+
+Catatan:
+
+  Untuk exercise Red Team, lakukan ini SETELAH lab selesai, bukan sebelum.
+
+--------------------------------------------------------------------------------
+[11.3] Disable / Monitor RC4
+--------------------------------------------------------------------------------
+
+Registry DC:
+
+  $regPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Kerberos\Parameters'
+  New-Item $regPath -Force | Out-Null
+  Set-ItemProperty $regPath -Name SupportedEncryptionTypes -Value 0x18
+
+GPO path:
+
+  Computer Configuration -> Windows Settings -> Security Settings -> Local Policies
+  -> Security Options -> Network security: Configure encryption types allowed for Kerberos
+
+Set:
+
+  AES128_HMAC_SHA1
+  AES256_HMAC_SHA1
+  Future encryption types
+
+Jangan pilih:
+
+  RC4_HMAC_MD5
+  DES
+
+
+================================================================================
+[ 12 ] RESPONSE PLAYBOOK
+================================================================================
+
+Jika alert Kerberoasting muncul:
+
+  1. Validasi Event ID 4769.
+  2. Catat source user, source IP, service target, encryption type.
+  3. Korelasikan dengan Event ID 4624 / 4672.
+  4. Jika source user valid attacker, disable account sementara.
+  5. Rotate password service account terdampak.
+  6. Remove privilege berlebih dari service account.
+  7. Cari lateral movement / remote shell.
+  8. Simpan evidence EVTX.
+  9. Buat incident report.
+
+--------------------------------------------------------------------------------
+[12.1] Script Containment Manual
+--------------------------------------------------------------------------------
+
+  param(
+      [Parameter(Mandatory)] [string]$AttackerUser
+  )
+
+  Disable-ADAccount -Identity $AttackerUser
+
+  Get-ADUser -Filter * -Properties servicePrincipalName |
+      Where-Object servicePrincipalName |
+      Select-Object SamAccountName, servicePrincipalName
+
+  wevtutil epl Security C:\Temp\Security-Kerberoast-Incident.evtx
+
+  Write-Host "Containment complete. Review service account passwords manually."
+
+
+================================================================================
+[ 13 ] VALIDASI END-TO-END
+================================================================================
+
+Jalankan dari Kali:
+
+  impacket-GetUserSPNs corp.local/jdoe:'User@123' \
+      -dc-ip 10.10.10.10 \
+      -request \
+      -outputfile hashes.txt
+
+Cek di DC:
+
+  Event Viewer -> Windows Logs -> Security -> Filter Event ID 4769
+
+Cek di Wazuh:
+
+  Security Events -> cari rule id 100100 / 100101 / 100102
+
+Expected:
+
+  - 4769 muncul.
+  - User jdoe terlihat.
+  - Source IP 10.10.10.50 terlihat.
+  - ServiceName berisi svc_sql, svc_web, svc_backup, svc_admin.
+  - Jika honeypot direquest, rule 100101 critical muncul.
+
+
+================================================================================
+[ 14 ] CHECKLIST BLUE TEAM SETUP
+================================================================================
+
+  [ ] Audit Kerberos Service Ticket Operations aktif
+  [ ] Audit Kerberos Authentication Service aktif
+  [ ] Logon dan Special Logon audit aktif
+  [ ] PowerShell Script Block Logging aktif
+  [ ] PowerShell Module Logging aktif
+  [ ] PowerShell Transcription aktif
+  [ ] Sysmon installed di DC01
+  [ ] Wazuh server running di 10.10.10.20
+  [ ] Wazuh agent connected dari DC01
+  [ ] Security log forwarded ke Wazuh
+  [ ] Sysmon log forwarded ke Wazuh
+  [ ] PowerShell log forwarded ke Wazuh
+  [ ] Custom Wazuh Kerberoasting rules installed
+  [ ] Honeypot SPN svc_sqlbackup_legacy created
+  [ ] Hunting queries tested
+  [ ] Response playbook ready
+  [ ] End-to-end attack -> alert test berhasil
+
+
+================================================================================
+[ 15 ] JAWABAN YANG DIHARAPKAN SAAT EXERCISE
+================================================================================
+
+  Main indicator       : Event ID 4769
+  Attacker user        : jdoe
+  Attacker IP          : 10.10.10.50
+  Technique            : Kerberoasting / T1558.003
+  Target service acct  : svc_sql, svc_web, svc_backup, svc_admin
+  Privileged account   : svc_admin
+  Risk                 : Offline password cracking, no lockout, DA compromise
+  Mitigation           : gMSA, long random password, remove DA from service acct,
+                         disable/monitor RC4, audit SPNs, honeypot SPN, SIEM rule
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================
